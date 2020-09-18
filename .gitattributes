@@ -1,0 +1,12 @@
+
+# exclude from GitHub's programming-language statistics
+/**/*.html linguist-vendored
+/**/*.ipynb linguist-vendored
+
+# These files are text and should be normalized (Convert crlf => lf)
+*.gitattributes text
+.gitignore      text
+*.md            text
+
+# Enable syntax highlighting for files with `.gitattributes` extensions.
+*.gitattributes linguist-language=gitattributes

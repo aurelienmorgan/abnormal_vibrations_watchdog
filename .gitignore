@@ -1,0 +1,10 @@
+
+**/.vs/
+**/.ipynb_checkpoints/
+**/__pycache__/
+
+_archive/
+images/src/
+data/*
+
+README.txt
