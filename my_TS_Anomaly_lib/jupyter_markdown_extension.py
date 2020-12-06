@@ -80,13 +80,19 @@ def md_extension_to_html(notebook_full_name: str) -> None :
     exporter = HTMLExporter()
     output, resources = exporter.from_notebook_node(nb)
     #print(output)
+
+    # VARIOUS ISSUES DIRTY FIXES BEGIN #
+    output = (
+        output \
+           # tqdm progressbar characters - unsupported
+           .replace('â–ˆ', '█').replace('â–‹', '▋').replace('â–‰', '▋')
+           # latex - unsupported
+           .replace('$\hat{y}$', '&ycirc;')
+    )
+    # VARIOUS ISSUES DIRTY FIXES BEGIN #
+
     codecs.open(html_full_name, 'w', encoding='utf-8') \
         .write(output
-                   # tqdm progressbar characters - unsupported
-                   .replace('â–ˆ', '█').replace('â–‹', '▋').replace('â–‰', '▋')
-                   # latex - unsupported
-                   .replace('$\hat{y}$', '&ycirc;')
-
                    # title and "code cells smaller font"
                    .replace('<title>Notebook</title>'
                            , '<title>' + '.'.join(notebook_name.split('.')[:-1]) + '</title>\n' +

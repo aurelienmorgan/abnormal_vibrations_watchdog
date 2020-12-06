@@ -1,16 +1,15 @@
 
-import os
-
-import re
-
-from pymongo import MongoClient, DESCENDING
+import os, re
 import pandas as pd
-from datetime import datetime
+
+from pymongo import MongoClient, DESCENDING, ASCENDING
+from datetime import datetime, timedelta
+from pprint import pprint
 
 from joblib import parallel_backend, Parallel, delayed
 from tqdm.notebook import tqdm as notebook_tqdm
 
-from .utils import millify
+from .utils import millify, print_timedelta
 
 
 #/////////////////////////////////////////////////////////////////////////////////////
@@ -41,12 +40,15 @@ class ProgressParallel(Parallel):
 
 
 def import_file_content(
-    measurements_file
+    database_name
+    , measurements_file
     , test_id
     , dump_size = 5_000
 
     , db_write_username = 'myAdmin'
     , password = 'my_admin_password'
+
+    , dev_env = False
 ) -> None :
     """
     Importing the content of 'measurements_file'
@@ -54,6 +56,8 @@ def import_file_content(
     Each batch-import contains at most 'dump_size' records.
 
     Parameters :
+        - database_name (str) :
+            the name of the database to be created
         - measurements_file (tuple(str, str)) :
             (dirpath, filename) of the sensors measurements file
             the content of which must be transferred.
@@ -62,9 +66,14 @@ def import_file_content(
             to the Mongo DB database at a time.
         - db_write_username (str) :
             name of the Mongo DB user used to operate the data dump
-            (write perission on database 'nasa_ims_database' required)
+            (write perission on database 'database_name' required)
         - password (str) :
             password of the Mongo DB user used to operate the data dump
+        - dev_env (bool) :
+            whether or not the database collection to be created
+            shall consider only part of the source data
+            (i.e. if it is for use in a 'development environment' context),
+            in which case only one every 1000 measurements is considered.
 
     Results :
         - N.A.
@@ -74,7 +83,7 @@ def import_file_content(
         'mongodb://%s:%s@127.0.0.1' % (db_write_username, password)
     ) as client :
 
-        db = client.nasa_ims_database
+        db = client[database_name]
         coll = db.measurements
 
         (dirpath, filename) = measurements_file
@@ -83,10 +92,19 @@ def import_file_content(
         #####################################################
         # read the content of the sensors measurements file #
         #####################################################
-        with open(file_path, 'rt') as measurements_file :
-            #print('process connected ' + file_path)
-            measurements = [line.rstrip('\n').split('\t')
-                            for line in measurements_file]
+        if not dev_env :
+            increment = 1
+        else :
+            increment = 1_000
+        with open(file_path, 'rt') as measurements_file_handle :
+            measurements = [
+                [int(lineno / increment)]+
+                [
+                    float(i) for i in line.rstrip('\n').split('\t')
+                ]
+                for lineno, line in enumerate(measurements_file_handle)
+                if (not dev_env) | (lineno % increment == 0)
+            ]
         #####################################################
 
 
@@ -112,8 +130,8 @@ def import_file_content(
                                           ] * len(measurements_slice)})
                         , pd.DataFrame(
                             measurements_slice
-                            , columns = ['sensor_' + str(j+1)
-                                         for j in range(len(measurements_slice[0]))]
+                            , columns = ['step']+['sensor_' + str(j+1)
+                                         for j in range(len(measurements_slice[0])-1)]
                         )
                     ]
                     , axis = 1
@@ -138,6 +156,8 @@ def measurements_to_mongo(
 
     , par_backend: str
     , n_jobs: int
+
+    , dev_env = False
 ) -> None :
     """
     Transfering the content of the sensors measurements files
@@ -158,6 +178,11 @@ def measurements_to_mongo(
             'loky', 'threading', or 'multiprocessing'.
         - n_jobs (int) :
             the maximum number of concurrently running jobs
+        - dev_env (bool) :
+            whether or not the database collection to be created
+            shall consider only part of the source data
+            (i.e. if it is for use in a 'development environment' context)
+            in which case the first 3/4 of measurement files are excluded.
 
     Results :
         - N.A.
@@ -165,11 +190,14 @@ def measurements_to_mongo(
 
     if not database_name in mongo_client.list_database_names() :
         print("Transferring data to Mongo DB :")
-        db = mongo_client.nasa_ims_database
+        db = mongo_client[database_name]
         coll = db.measurements
 
         silent = coll.create_index(
             [('test_id', DESCENDING)], name = 'test_id_idx', background = True
+        )
+        silent = coll.create_index(
+            [('timestamp', DESCENDING)], name = 'timestamp_idx', background = True
         )
 
         ########################################################
@@ -177,9 +205,13 @@ def measurements_to_mongo(
         ########################################################
         measurements_files = []
         for (dirpath, dirnames, filenames) in os.walk(root_dir) :
-            for filename in filenames : #[1:10] :
+            for filename in filenames : #[:10] :
                 if measurements_filename_pattern.match(filename) :
                     measurements_files.append((dirpath, filename))
+        if dev_env :
+            measurements_files = measurements_files[
+                int((3/4)*len(measurements_files))::
+            ]
         ########################################################
         subfolders = \
             sorted(
@@ -199,9 +231,11 @@ def measurements_to_mongo(
                                                , use_tqdm = (verbose > 0)
                                                , total = total)(
                     delayed(import_file_content)(
-                        measurements_files[idx]
+                        database_name
+                        , measurements_files[idx]
                         , test_id = \
                             subfolders.index(measurements_files[idx][0]) + 1
+                        , dev_env = dev_env
                     )
                     for idx in range(len(measurements_files))
                 )
@@ -209,8 +243,8 @@ def measurements_to_mongo(
 
         print("Imported " +
               millify(
-                  mongo_client.nasa_ims_database.measurements \
-                  .estimated_document_count()) + " 'timestep' documents"
+                  db.measurements \
+                  .estimated_document_count()) + " 'timestep' documents."
              )
     else :
         print("EXITED. A database named '"+ database_name +
@@ -222,7 +256,92 @@ def measurements_to_mongo(
 #/////////////////////////////////////////////////////////////////////////////////////
 
 
+def get_test_first_timestamps(
+    mongo_client: MongoClient
+    , database_name: str = 'nasa_ims_database' # 'nasa_ims_database_dev' # 
+    , test_id: int = 2
+    , timestamps_count: int = 6
+    , sensor_name: str = 'sensor_1'
+) :
+    """
+    Retrieve the data points corresponding to a given sensor for a given test.
+    Only collects data points for some earliest measurements.
 
+    Parameters :
+        - mongo_client (pymongo.MongoClient) :
+            the Mongo DB client (connected to the target server)
+        - database_name (str) :
+            the name of the database to be created
+        - test_id (int) :
+            which one of the tests shall be considered
+        - timestamps_count (int) :
+            how many of the earliest timestamps
+            shall be considered
+        - sensor_name (str) :
+            which one of the sensors shall be considered
+    Results :
+        - (pd.DataFrame) :
+            retrieved measurement records
+            The recordset is enriched with a 'long_datetime' column
+            gathering the information from the 'timestamp'
+            and the 'step' fields.
+            REMINDER :
+                each measurement consists of
+                several data points (several steps).
+    """
+
+    start_time = datetime.now()
+
+    #######################################
+    # RETRIEVE THE FIRST TIMESTAMP VALUES #
+    #######################################
+    cursor = mongo_client[database_name].measurements.aggregate([
+        {'$match': { 'test_id': test_id }}
+        , {'$group': { '_id': "$timestamp"}}
+        , {'$sort': {'_id': ASCENDING}}
+        , {'$limit': timestamps_count}
+    ])
+    earliest_timestamps = list(cursor)
+    #pprint(earliest_timestamps)
+    #######################################
+
+    ##########################################
+    # RETRIEVE THE CORRESPONDING MEASURMENTS #
+    ##########################################
+    cursor = mongo_client[database_name].measurements.aggregate([
+        {'$match': {
+            'test_id': test_id
+            , "timestamp": {
+               "$gte": earliest_timestamps[0].get('_id')
+               , "$lte": earliest_timestamps[-1].get('_id')
+            }
+        }}
+        , {'$sort': {'step': ASCENDING}}
+        , { "$project": {
+            "_id": 0
+            , "timestamp": 1
+            , "step": 1
+            , sensor_name: 1
+        } }
+    ])
+    data = pd.DataFrame(list(cursor))
+    ##########################################
+
+    # format according to the number of different steps
+    # of each "1-second-long" measurement =>
+    second_slices_count = int(data.shape[0]/timestamps_count) - 1
+    def datetime_slice_function(df_row) :
+        return df_row['timestamp'] + \
+               timedelta(seconds = df_row['step']/second_slices_count)
+    data['long_datetime'] = data[['timestamp', 'step']].apply(datetime_slice_function, axis=1)
+    del data['step']
+
+
+    print_timedelta(start_time)
+    return data
+
+
+#/////////////////////////////////////////////////////////////////////////////////////
 
 
 
