@@ -13,7 +13,7 @@ The model we train is ready for deployment. Taking vibration sensor signal as in
 to raise an alert, would the working conditions deteriorate to an extend that
 the material is very likely to fail in a foreseeable future, thus indicating that
 operation shall be stopped and replacement of the faulty part operated before
-larger damage could be incured.
+larger damage could be incurred.
 
 The below notebook contains an end-to-end ETL data pipeline plus a whole Bayesian Optimization cycle
 for the LSTM Autoencoder implemented to fit the bill&nbsp;:
